@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Whisper Voice Assistant</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 640px; margin: 48px auto; padding: 0 16px; }
+  button { font-size: 18px; padding: 12px 24px; border-radius: 8px; cursor: pointer; }
+  #log p { margin: 8px 0; }
+  small { color: #666; }
+</style>
+<h1>Whisper Voice Assistant</h1>
+<p>Click to start talking, click again to send. Speech-to-text, the reply and text-to-speech all run on this server's GPU.</p>
+<button id="rec">Start talking</button>
+<div id="log"></div>
+<script>
+const btn = document.getElementById('rec'), log = document.getElementById('log');
+let rec = null;
+
+function line(label, text) {
+  const p = document.createElement('p');
+  const b = document.createElement('b');
+  b.textContent = label + ' ';
+  p.append(b, text);
+  log.prepend(p);
+}
+
+btn.onclick = async () => {
+  if (rec) { rec.stop(); return; }
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const chunks = [];
+  rec = new MediaRecorder(stream);
+  rec.ondataavailable = e => chunks.push(e.data);
+  rec.onstop = async () => {
+    stream.getTracks().forEach(t => t.stop());
+    const type = rec.mimeType;
+    rec = null;
+    btn.textContent = 'Thinking…';
+    btn.disabled = true;
+    const form = new FormData();
+    form.append('audio', new Blob(chunks, { type }), 'speech.webm');
+    try {
+      const r = await fetch('talk', { method: 'POST', body: form });
+      if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+      const h = k => decodeURIComponent(r.headers.get(k) || '');
+      line('Latency (ms):', h('X-Latency-Ms'));
+      line('Assistant:', h('X-Reply'));
+      line('You:', h('X-Transcript'));
+      new Audio(URL.createObjectURL(await r.blob())).play();
+    } catch (e) {
+      line('Error:', e.message);
+    }
+    btn.textContent = 'Start talking';
+    btn.disabled = false;
+  };
+  rec.start();
+  btn.textContent = 'Stop and send';
+};
+</script>
+</html>

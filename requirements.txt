@@ -1,0 +1,11 @@
+torch
+openai-whisper
+kokoro>=0.9.4
+transformers
+fastapi
+uvicorn
+python-multipart
+soundfile
+numpy
+jiwer
+datasets
