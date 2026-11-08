@@ -1,7 +1,6 @@
 # Whisper Voice Assistant
 
-A self-hosted voice conversation pipeline that runs entirely on your own GPU, as an alternative to hosted
-OpenAI audio APIs:
+A self-hosted voice conversation pipeline that runs entirely on your own machine, as an alternative to hosted audio APIs:
 
 ```
 microphone ──► Whisper (speech-to-text) ──► Qwen2.5-0.5B-Instruct (reply) ──► Kokoro-82M (text-to-speech) ──► speaker
@@ -9,6 +8,19 @@ microphone ──► Whisper (speech-to-text) ──► Qwen2.5-0.5B-Instruct (r
 ```
 
 All three models are open source PyTorch models served behind one FastAPI app. No audio or text leaves the machine.
+
+Licensed under the [MIT License](LICENSE).
+
+## Why this exists
+
+Hosted speech APIs are easy, but every utterance leaves the machine, pricing is usage-based, and you cannot swap the speech or language model. This repo is a small, inspectable stack for the other case: a developer who wants speech-to-text, a short reply, and speech back, using only open weights, on hardware they control.
+
+It is infrastructure for local voice apps, not a chatbot product:
+
+- One process owns the full turn (`POST /talk`: audio in, spoken reply out).
+- Models load once at startup and stay warm, so a request does not pay load time.
+- Whisper size, the reply model, and the Kokoro voice are environment variables.
+- `evaluate.py` measures word error rate, latency, real-time factor, and peak GPU memory across Whisper sizes and FP16 vs FP32, so the size you ship is a measured choice.
 
 ## What's in the repo
 
@@ -18,18 +30,25 @@ All three models are open source PyTorch models served behind one FastAPI app. N
 | `index.html` | Minimal browser client: record from the mic, send to `/talk`, play the reply |
 | `evaluate.py` | Benchmarks Whisper `tiny` / `base` / `small` on LibriSpeech: WER, latency, real-time factor, peak GPU memory, FP16 vs FP32 |
 | `results.md` | Output of `evaluate.py` on a GPU |
+| `Dockerfile` | CPU image with ffmpeg and espeak-ng. Use the host or Colab path below for CUDA. |
+| `pyproject.toml` | Installable package metadata (`pip install .`) |
 
 ## GPU inference optimizations
 
-- **FP16 inference.** On CUDA, Whisper decodes in half precision and the LLM weights are cast to `float16`,
-  cutting memory traffic and using tensor cores. `evaluate.py` measures FP16 against FP32 on the same model.
-- **Warm model loading.** All models are loaded onto the GPU once at startup (FastAPI `lifespan`) and run once
-  on dummy input, so no request pays model-load or CUDA kernel-initialization cost. `evaluate.py` reports the
-  load time this avoids per request.
-- **Accurate GPU timing.** Latency measurements call `torch.cuda.synchronize()` before stopping the clock,
-  because CUDA kernels run asynchronously.
-- **Model-size trade-off.** The Whisper size is a single env var (`WHISPER_MODEL`), chosen from the WER vs
-  latency table below.
+- **FP16 inference.** On CUDA, Whisper decodes in half precision and the LLM weights are cast to `float16`, cutting memory traffic and using tensor cores. `evaluate.py` measures FP16 against FP32 on the same model.
+- **Warm model loading.** All models are loaded onto the GPU once at startup (FastAPI `lifespan`) and run once on dummy input, so no request pays model-load or CUDA kernel-initialization cost. `evaluate.py` reports the load time this avoids per request.
+- **Accurate GPU timing.** Latency measurements call `torch.cuda.synchronize()` before stopping the clock, because CUDA kernels run asynchronously.
+- **Model-size trade-off.** The Whisper size is a single env var (`WHISPER_MODEL`), chosen from the WER vs latency table below.
+
+## Install
+
+```bash
+pip install -r requirements.txt
+# or, to install the project itself:
+pip install .
+```
+
+Needs Python 3.10–3.12, `ffmpeg`, and ideally an NVIDIA GPU (it falls back to CPU in FP32).
 
 ## Run it on a GPU (Google Colab)
 
@@ -59,8 +78,7 @@ print(eval_js("google.colab.kernel.proxyPort(8000)"))   # open this URL, click "
 
 ## Run it locally
 
-Needs Python 3.10–3.12, `ffmpeg`, and ideally an NVIDIA GPU (it falls back to CPU in FP32). Built for Linux +
-CUDA; on macOS the espeak-ng library bundled with Kokoro fails to load its data, so use Colab there.
+Built for Linux + CUDA; on macOS the espeak-ng library bundled with Kokoro fails to load its data, so use Colab there.
 
 ```bash
 pip install -r requirements.txt
@@ -74,21 +92,29 @@ curl -s -F audio=@question.wav http://localhost:8000/talk -D - -o reply.wav
 curl -s -F audio=@question.wav http://localhost:8000/transcribe
 ```
 
-`/talk` returns the spoken reply as `audio/wav`. The transcript, the reply text and per-stage latency
-(`stt`, `llm`, `tts` in ms) come back in the `X-Transcript`, `X-Reply` and `X-Latency-Ms` headers.
+`/talk` returns the spoken reply as `audio/wav`. The transcript, the reply text and per-stage latency (`stt`, `llm`, `tts` in ms) come back in the `X-Transcript`, `X-Reply` and `X-Latency-Ms` headers.
 
-Configuration (env vars): `WHISPER_MODEL` (default `base`), `LLM_MODEL` (default `Qwen/Qwen2.5-0.5B-Instruct`),
-`VOICE` (Kokoro voice, default `af_heart`).
+Configuration (env vars): `WHISPER_MODEL` (default `base`), `LLM_MODEL` (default `Qwen/Qwen2.5-0.5B-Instruct`), `VOICE` (Kokoro voice, default `af_heart`).
+
+## Docker (CPU)
+
+```bash
+docker build -t whisper-voice-assistant .
+docker run --rm -p 8000:8000 whisper-voice-assistant
+```
+
+The image installs ffmpeg and espeak-ng and serves the same app. It does not include CUDA. For GPU latency, run on the host or in Colab as above.
 
 ## Results
 
-Whisper on LibriSpeech test clips, measured with `python evaluate.py`. See [`results.md`](results.md) for the
-table from the latest GPU run: word error rate, mean latency per clip, real-time factor, peak GPU memory and
-load time for each model size in FP16 and FP32.
+Whisper on LibriSpeech test clips, measured with `python evaluate.py`. See [`results.md`](results.md) for the table from the latest GPU run: word error rate, mean latency per clip, real-time factor, peak GPU memory and load time for each model size in FP16 and FP32.
 
 ## Limitations
 
-- Requests are handled one at a time on a single GPU. Serving many users would need a worker queue with
-  request batching.
+- Requests are handled one at a time on a single GPU. Serving many users would need a worker queue with request batching.
 - Each `/talk` call is a single turn; conversation history is not kept between requests.
 - English only (`language="en"`, Kokoro American English voice).
+
+## License
+
+[MIT](LICENSE).
